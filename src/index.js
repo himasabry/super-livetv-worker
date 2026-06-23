@@ -1,5 +1,5 @@
 export default {
-  async fetch(request) { 
+  async fetch(request) {
 
     const url = new URL(request.url);
     const path = url.pathname;
@@ -9,21 +9,59 @@ export default {
 
     const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
-    // 🔁 Proxy للـ segments (HLS + DASH)
+    // 🔁 Proxy للـ segments وملفات الفيديو
     if (proxyUrl) {
-      const resp = await fetch(proxyUrl, {
-        headers: {
-          "User-Agent": UA,
-          "Referer": "https://www.google.com/"
+      try {
+        const proxyHeaders = new Headers();
+        proxyHeaders.set("User-Agent", UA);
+        proxyHeaders.set("Accept", "*/*");
+        proxyHeaders.set("Accept-Language", "en-US,en;q=0.9");
+        proxyHeaders.set("Accept-Encoding", "identity");
+        proxyHeaders.set("Origin", url.origin);
+        
+        // Forward Range header للـ seeking
+        const range = request.headers.get("Range");
+        if (range) {
+          proxyHeaders.set("Range", range);
         }
-      });
 
-      return new Response(resp.body, {
-        headers: {
-          "Content-Type": resp.headers.get("content-type") || "application/octet-stream",
-          "Access-Control-Allow-Origin": "*"
+        const resp = await fetch(proxyUrl, {
+          method: "GET",
+          headers: proxyHeaders,
+          redirect: "follow"
+        });
+
+        // لو الـ source رجع خطأ، نرجعه زي ما هو
+        if (!resp.ok) {
+          return new Response(resp.body, {
+            status: resp.status,
+            statusText: resp.statusText,
+            headers: {
+              "Content-Type": resp.headers.get("content-type") || "application/octet-stream",
+              "Access-Control-Allow-Origin": "*"
+            }
+          });
         }
-      });
+
+        const responseHeaders = new Headers();
+        responseHeaders.set("Access-Control-Allow-Origin", "*");
+        responseHeaders.set("Access-Control-Allow-Headers", "Range");
+        responseHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range");
+        
+        // نمرر الـ headers المهمة من الـ source
+        const passThrough = ["content-type", "content-length", "content-range", "accept-ranges", "cache-control", "etag", "last-modified"];
+        for (const h of passThrough) {
+          const val = resp.headers.get(h);
+          if (val) responseHeaders.set(h, val);
+        }
+
+        return new Response(resp.body, {
+          status: resp.status,
+          headers: responseHeaders
+        });
+      } catch (e) {
+        return new Response("Proxy error: " + e.message, { status: 502 });
+      }
     }
 
     // 🔴 قنوات MPD (بالمسار)
@@ -128,7 +166,10 @@ export default {
     }
 
     const response = await fetch(streamUrl, {
-      headers: { "User-Agent": UA },
+      headers: { 
+        "User-Agent": UA,
+        "Accept": "*/*"
+      },
       redirect: "follow"
     });
 
@@ -139,16 +180,35 @@ export default {
     // 🔥 rewrite m3u8 (محسن)
     const modified = text.split('\n').map(line => {
       line = line.trim();
-      if (!line || line.startsWith("#")) return line;
+      if (!line || line.startsWith("#")) {
+        // معالجة EXT-X-KEY URI
+        if (line.startsWith("#EXT-X-KEY")) {
+          return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+            let full = uri.startsWith("http") ? uri : base + uri;
+            return `URI="${url.origin}/?url=${encodeURIComponent(full)}"`;
+          });
+        }
+        return line;
+      }
       
-      let absoluteUrl = line.startsWith("http") ? line : base + line;
+      // URLs نسبية أو مطلقة
+      let absoluteUrl = line;
+      if (line.startsWith("http")) {
+        absoluteUrl = line;
+      } else if (line.startsWith("//")) {
+        absoluteUrl = "https:" + line;
+      } else {
+        absoluteUrl = base + line;
+      }
+      
       return `${url.origin}/?url=${encodeURIComponent(absoluteUrl)}`;
     }).join('\n');
 
     return new Response(modified, {
       headers: {
         "Content-Type": "application/vnd.apple.mpegurl",
-        "Access-Control-Allow-Origin": "*"
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Range"
       }
     });
   }
