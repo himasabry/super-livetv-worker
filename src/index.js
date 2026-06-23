@@ -9,47 +9,35 @@ export default {
 
     const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
-    // 🔁 Proxy للـ segments وملفات الفيديو
+    // 🔁 Proxy للـ playlists بس (.m3u8, .mpd, .key)
     if (proxyUrl) {
+      const proxyExt = proxyUrl.split('?')[0].split('.').pop().toLowerCase();
+      
+      // لو ده segment فيديو (.ts, .mp4, .aac) → رجّعه مباشرة من غير proxy
+      if (['ts', 'mp4', 'aac', 'webm', 'm4s'].includes(proxyExt)) {
+        return Response.redirect(proxyUrl, 302);
+      }
+
+      // proxy للـ playlists والـ keys
       try {
         const proxyHeaders = new Headers();
         proxyHeaders.set("User-Agent", UA);
         proxyHeaders.set("Accept", "*/*");
-        proxyHeaders.set("Accept-Language", "en-US,en;q=0.9");
-        proxyHeaders.set("Accept-Encoding", "identity");
-        proxyHeaders.set("Origin", url.origin);
         
-        // Forward Range header للـ seeking
         const range = request.headers.get("Range");
-        if (range) {
-          proxyHeaders.set("Range", range);
-        }
+        if (range) proxyHeaders.set("Range", range);
 
         const resp = await fetch(proxyUrl, {
-          method: "GET",
           headers: proxyHeaders,
           redirect: "follow"
         });
-
-        // لو الـ source رجع خطأ، نرجعه زي ما هو
-        if (!resp.ok) {
-          return new Response(resp.body, {
-            status: resp.status,
-            statusText: resp.statusText,
-            headers: {
-              "Content-Type": resp.headers.get("content-type") || "application/octet-stream",
-              "Access-Control-Allow-Origin": "*"
-            }
-          });
-        }
 
         const responseHeaders = new Headers();
         responseHeaders.set("Access-Control-Allow-Origin", "*");
         responseHeaders.set("Access-Control-Allow-Headers", "Range");
         responseHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range");
         
-        // نمرر الـ headers المهمة من الـ source
-        const passThrough = ["content-type", "content-length", "content-range", "accept-ranges", "cache-control", "etag", "last-modified"];
+        const passThrough = ["content-type", "content-length", "content-range", "accept-ranges", "cache-control"];
         for (const h of passThrough) {
           const val = resp.headers.get(h);
           if (val) responseHeaders.set(h, val);
@@ -64,11 +52,9 @@ export default {
       }
     }
 
-    // 🔴 قنوات MPD (بالمسار)
+    // 🔴 قنوات MPD
     if (path.endsWith(".mpd")) {
-
       const fileName = path.split("/").pop();
-
       const mpdChannels = {
         "bn_1.mpd": {
           url: "https://fastlyrwb-live.cdn.intigral-ott.net/bpk-tv/STCT1/wv-pr/manifest.mpd",
@@ -81,33 +67,21 @@ export default {
       };
 
       const channel = mpdChannels[fileName];
+      if (!channel) return new Response("MPD channel not found", { status: 404 });
 
-      if (!channel) {
-        return new Response("MPD channel not found", { status: 404 });
-      }
-
-      // 📡 API للمفاتيح
       if (info === "1") {
         return new Response(JSON.stringify(channel, null, 2), {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
         });
       }
 
       const resp = await fetch(channel.url, {
-        headers: {
-          "User-Agent": UA,
-          "Referer": "https://www.google.com/"
-        }
+        headers: { "User-Agent": UA, "Referer": "https://www.google.com/" }
       });
 
       let text = await resp.text();
-
       const base = channel.url.substring(0, channel.url.lastIndexOf("/") + 1);
 
-      // 🔥 rewrite MPD
       text = text
         .replace(/<BaseURL>(.*?)<\/BaseURL>/g, (match, p1) => {
           let full = p1.startsWith("http") ? p1 : base + p1;
@@ -119,14 +93,11 @@ export default {
         });
 
       return new Response(text, {
-        headers: {
-          "Content-Type": "application/dash+xml",
-          "Access-Control-Allow-Origin": "*"
-        }
+        headers: { "Content-Type": "application/dash+xml", "Access-Control-Allow-Origin": "*" }
       });
     }
 
-    // 🟢 قنوات HLS (بالـ id)
+    // 🟢 قنوات HLS
     const channels = {
       "bmax1": "https://tinyurl.com/8a498cvu",
       "bmax2": "https://tinyurl.com/2nh7rmsn",
@@ -155,21 +126,13 @@ export default {
       "TOD1": "https://github.com/himasabry/xpola-player/raw/refs/heads/main/TOD1.m3u8"
     };
 
-    if (!id) {
-      return new Response("Missing id", { status: 400 });
-    }
+    if (!id) return new Response("Missing id", { status: 400 });
 
     const streamUrl = channels[id];
-
-    if (!streamUrl) {
-      return new Response("Channel not found", { status: 404 });
-    }
+    if (!streamUrl) return new Response("Channel not found", { status: 404 });
 
     const response = await fetch(streamUrl, {
-      headers: { 
-        "User-Agent": UA,
-        "Accept": "*/*"
-      },
+      headers: { "User-Agent": UA, "Accept": "*/*" },
       redirect: "follow"
     });
 
@@ -177,11 +140,11 @@ export default {
     const text = await response.text();
     const base = finalUrl.substring(0, finalUrl.lastIndexOf("/") + 1);
 
-    // 🔥 rewrite m3u8 (محسن)
+    // 🔥 rewrite m3u8: playlists تتعمل proxy، segments تتجيب مباشرة
     const modified = text.split('\n').map(line => {
       line = line.trim();
       if (!line || line.startsWith("#")) {
-        // معالجة EXT-X-KEY URI
+        // معالجة EXT-X-KEY
         if (line.startsWith("#EXT-X-KEY")) {
           return line.replace(/URI="([^"]+)"/g, (match, uri) => {
             let full = uri.startsWith("http") ? uri : base + uri;
@@ -191,8 +154,8 @@ export default {
         return line;
       }
       
-      // URLs نسبية أو مطلقة
-      let absoluteUrl = line;
+      // تحويل لـ URL مطلق
+      let absoluteUrl;
       if (line.startsWith("http")) {
         absoluteUrl = line;
       } else if (line.startsWith("//")) {
@@ -201,7 +164,15 @@ export default {
         absoluteUrl = base + line;
       }
       
-      return `${url.origin}/?url=${encodeURIComponent(absoluteUrl)}`;
+      const ext = absoluteUrl.split('?')[0].split('.').pop().toLowerCase();
+      
+      // لو playlist (.m3u8) → proxy عشان نكمل rewrite
+      if (ext === 'm3u8') {
+        return `${url.origin}/?url=${encodeURIComponent(absoluteUrl)}`;
+      }
+      
+      // لو segment (.ts, .mp4, .aac) → رجّعه مباشرة من غير proxy
+      return absoluteUrl;
     }).join('\n');
 
     return new Response(modified, {
