@@ -9,52 +9,42 @@ export default {
 
     const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
-    // 🔁 Proxy للـ playlists بس (.m3u8, .mpd, .key)
+    // 🔁 Proxy للـ playlists (.m3u8, .mpd, .key) بس
     if (proxyUrl) {
-      const proxyExt = proxyUrl.split('?')[0].split('.').pop().toLowerCase();
-      
-      // لو ده segment فيديو (.ts, .mp4, .aac) → رجّعه مباشرة من غير proxy
-      if (['ts', 'mp4', 'aac', 'webm', 'm4s'].includes(proxyExt)) {
+      const ext = proxyUrl.split('?')[0].split('.').pop().toLowerCase();
+
+      // لو ده segment فيديو → رجّعه مباشرة للمتصفح من غير ما يعدي على Worker
+      if (['ts', 'mp4', 'aac', 'webm', 'm4s', 'mp2t'].includes(ext)) {
         return Response.redirect(proxyUrl, 302);
       }
 
       // proxy للـ playlists والـ keys
-      try {
-        const proxyHeaders = new Headers();
-        proxyHeaders.set("User-Agent", UA);
-        proxyHeaders.set("Accept", "*/*");
-        
-        const range = request.headers.get("Range");
-        if (range) proxyHeaders.set("Range", range);
-
-        const resp = await fetch(proxyUrl, {
-          headers: proxyHeaders,
-          redirect: "follow"
-        });
-
-        const responseHeaders = new Headers();
-        responseHeaders.set("Access-Control-Allow-Origin", "*");
-        responseHeaders.set("Access-Control-Allow-Headers", "Range");
-        responseHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range");
-        
-        const passThrough = ["content-type", "content-length", "content-range", "accept-ranges", "cache-control"];
-        for (const h of passThrough) {
-          const val = resp.headers.get(h);
-          if (val) responseHeaders.set(h, val);
+      const resp = await fetch(proxyUrl, {
+        headers: {
+          "User-Agent": UA,
+          "Accept": "*/*",
+          "Referer": "https://www.google.com/"
         }
+      });
 
-        return new Response(resp.body, {
-          status: resp.status,
-          headers: responseHeaders
-        });
-      } catch (e) {
-        return new Response("Proxy error: " + e.message, { status: 502 });
-      }
+      const responseHeaders = new Headers();
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+      responseHeaders.set("Access-Control-Allow-Headers", "Range");
+      
+      const contentType = resp.headers.get("content-type");
+      if (contentType) responseHeaders.set("Content-Type", contentType);
+
+      return new Response(resp.body, {
+        status: resp.status,
+        headers: responseHeaders
+      });
     }
 
-    // 🔴 قنوات MPD
+    // 🔴 قنوات MPD (بالمسار)
     if (path.endsWith(".mpd")) {
+
       const fileName = path.split("/").pop();
+
       const mpdChannels = {
         "bn_1.mpd": {
           url: "https://fastlyrwb-live.cdn.intigral-ott.net/bpk-tv/STCT1/wv-pr/manifest.mpd",
@@ -67,21 +57,33 @@ export default {
       };
 
       const channel = mpdChannels[fileName];
-      if (!channel) return new Response("MPD channel not found", { status: 404 });
 
+      if (!channel) {
+        return new Response("MPD channel not found", { status: 404 });
+      }
+
+      // 📡 API للمفاتيح
       if (info === "1") {
         return new Response(JSON.stringify(channel, null, 2), {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
         });
       }
 
       const resp = await fetch(channel.url, {
-        headers: { "User-Agent": UA, "Referer": "https://www.google.com/" }
+        headers: {
+          "User-Agent": UA,
+          "Referer": "https://www.google.com/"
+        }
       });
 
       let text = await resp.text();
+
       const base = channel.url.substring(0, channel.url.lastIndexOf("/") + 1);
 
+      // 🔥 rewrite MPD
       text = text
         .replace(/<BaseURL>(.*?)<\/BaseURL>/g, (match, p1) => {
           let full = p1.startsWith("http") ? p1 : base + p1;
@@ -93,11 +95,14 @@ export default {
         });
 
       return new Response(text, {
-        headers: { "Content-Type": "application/dash+xml", "Access-Control-Allow-Origin": "*" }
+        headers: {
+          "Content-Type": "application/dash+xml",
+          "Access-Control-Allow-Origin": "*"
+        }
       });
     }
 
-    // 🟢 قنوات HLS
+    // 🟢 قنوات HLS (بالـ id)
     const channels = {
       "bmax1": "https://tinyurl.com/8a498cvu",
       "bmax2": "https://tinyurl.com/2nh7rmsn",
@@ -126,13 +131,18 @@ export default {
       "TOD1": "https://github.com/himasabry/xpola-player/raw/refs/heads/main/TOD1.m3u8"
     };
 
-    if (!id) return new Response("Missing id", { status: 400 });
+    if (!id) {
+      return new Response("Missing id", { status: 400 });
+    }
 
     const streamUrl = channels[id];
-    if (!streamUrl) return new Response("Channel not found", { status: 404 });
+
+    if (!streamUrl) {
+      return new Response("Channel not found", { status: 404 });
+    }
 
     const response = await fetch(streamUrl, {
-      headers: { "User-Agent": UA, "Accept": "*/*" },
+      headers: { "User-Agent": UA },
       redirect: "follow"
     });
 
@@ -140,9 +150,11 @@ export default {
     const text = await response.text();
     const base = finalUrl.substring(0, finalUrl.lastIndexOf("/") + 1);
 
-    // 🔥 rewrite m3u8: playlists تتعمل proxy، segments تتجيب مباشرة
+    // 🔥 rewrite m3u8: playlists → proxy، segments → مباشر
     const modified = text.split('\n').map(line => {
       line = line.trim();
+      
+      // سطور التعليقات
       if (!line || line.startsWith("#")) {
         // معالجة EXT-X-KEY
         if (line.startsWith("#EXT-X-KEY")) {
@@ -166,12 +178,13 @@ export default {
       
       const ext = absoluteUrl.split('?')[0].split('.').pop().toLowerCase();
       
-      // لو playlist (.m3u8) → proxy عشان نكمل rewrite
+      // لو playlist (.m3u8) → proxy عشان نقدر نكمل rewrite
       if (ext === 'm3u8') {
         return `${url.origin}/?url=${encodeURIComponent(absoluteUrl)}`;
       }
       
-      // لو segment (.ts, .mp4, .aac) → رجّعه مباشرة من غير proxy
+      // لو segment (.ts, .mp4, .aac...) → رجّعه مباشرة من غير proxy
+      // الفيديو هيتجيب من IP المنزل مش من Cloudflare
       return absoluteUrl;
     }).join('\n');
 
